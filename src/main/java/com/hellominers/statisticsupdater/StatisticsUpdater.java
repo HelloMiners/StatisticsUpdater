@@ -78,7 +78,7 @@ public class StatisticsUpdater extends JavaPlugin {
         }
         Path statsDir = MinecraftServer.getServer().getWorldPath(LevelResource.PLAYER_STATS_DIR);
         try {
-            new FileBatchingTask(statsDir, ITEM_MAPPING, BLOCK_MAPPING, getSLF4JLogger()).runTaskTimer(this, 0L, 1L);
+            new FileBatchingTask(statsDir, ITEM_MAPPING, BLOCK_MAPPING, this).runTaskTimer(this, 0L, 1L);
         }
         catch (IOException e) {
             getSLF4JLogger().error("Failed to initialize file batching task", e);

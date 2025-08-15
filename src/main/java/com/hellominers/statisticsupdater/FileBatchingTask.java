@@ -11,10 +11,19 @@ import com.mojang.serialization.Dynamic;
 import com.mojang.serialization.DynamicOps;
 import com.mojang.serialization.JsonOps;
 import net.kyori.adventure.key.Key;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.datafix.fixes.References;
 import org.bukkit.craftbukkit.CraftRegistry;
 import org.bukkit.craftbukkit.util.CraftMagicNumbers;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.HandlerList;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.slf4j.Logger;
 
@@ -27,7 +36,7 @@ import java.util.Map;
 import java.util.function.IntFunction;
 import java.util.stream.Stream;
 
-public class FileBatchingTask extends BukkitRunnable {
+public class FileBatchingTask extends BukkitRunnable implements Listener {
 
     public static final String MINECRAFT_NAMESPACE = Key.MINECRAFT_NAMESPACE + Key.DEFAULT_SEPARATOR;
 
@@ -51,12 +60,18 @@ public class FileBatchingTask extends BukkitRunnable {
 
     int ticksLagged = 0;
 
-    public FileBatchingTask(Path dir, IntFunction<String> itemUpdater, IntFunction<String> blockUpdater, Logger logger) throws IOException {
+    public FileBatchingTask(Path dir, IntFunction<String> itemUpdater, IntFunction<String> blockUpdater, Plugin plugin) throws IOException {
         this.filesStream = Files.list(dir);
         this.filesIter = filesStream.iterator();
         this.itemUpdater = itemUpdater;
         this.blockUpdater = blockUpdater;
-        this.logger = logger;
+        this.logger = plugin.getSLF4JLogger();
+        plugin.getServer().getPluginManager().registerEvents(this, plugin);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void on(AsyncPlayerPreLoginEvent event) {
+        event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, Component.text("Server is undergoing statistic files upgrade! DO NOT JOIN!", NamedTextColor.RED, TextDecoration.BOLD));
     }
 
     @Override
@@ -71,23 +86,31 @@ public class FileBatchingTask extends BukkitRunnable {
                 statsJson = Streams.parse(jsonReader).getAsJsonObject();
             }
             catch (JsonParseException e) {
-                logger.warn("Stats file '{}' has invalid JSON, skipping.", statsFile, e);
-                return;
+                logger.error("Stats file '{}' has invalid JSON, skipping.", statsFile, e);
+                continue;
             }
             catch (IOException e) {
-                logger.warn("IO error while loading stats file '{}', skipping.", statsFile, e);
-                return;
+                logger.error("IO error while loading stats file '{}', skipping.", statsFile, e);
+                continue;
+            }
+            catch (Exception e) {
+                logger.error("Unknown exception while loading stats file '{}', skipping.", statsFile, e);
+                continue;
             }
             // If it has a data version or an updated "stats" block, it's new enough to hopefully not have number ids
-            if (statsJson.get("DataVersion") != null || statsJson.get("stats") != null) {
+            if (statsJson.has("DataVersion") || statsJson.has("stats")) {
                 logger.info("Stats file '{}' is already up-to-date, skipping.", statsFile);
-                return;
+                continue;
             }
             // Let MC do what it can with the updating, handles converting the "stats.useItem" format to a "stats" block with modern stat names
             JsonObject updatedStats = dataFixer.update(References.STATS, new Dynamic<>(registryJsonOps, statsJson), MCVersions.V15W32A, currentDataVersion).getValue().getAsJsonObject();
+            if (!(updatedStats.get("stats") instanceof JsonObject statsObject)) {
+                logger.error("Stats file '{}' updated incorrectly? missing 'stats' object.", statsFile);
+                continue;
+            }
 
             // Pairs of statistic name -> values object
-            for (Map.Entry<String, JsonElement> entry : updatedStats.getAsJsonObject("stats").entrySet()) {
+            for (Map.Entry<String, JsonElement> entry : statsObject.entrySet()) {
                 String statistic = entry.getKey();
                 IntFunction<String> updater = switch (statistic) {
                     case "minecraft:crafted", "minecraft:used", "minecraft:broken", "minecraft:picked_up", "minecraft:dropped" -> itemUpdater;
@@ -122,9 +145,13 @@ public class FileBatchingTask extends BukkitRunnable {
             catch (IOException e) {
                 logger.error("Failed to write stats file '{}':", statsFile, e);
             }
+            catch (Exception e) {
+                logger.error("Unknown exception while writing stats file '{}', skipping.", statsFile, e);
+            }
         }
         if (!filesIter.hasNext()) {
             logger.info("""
+                    
                     
                     
                     
@@ -152,12 +179,13 @@ public class FileBatchingTask extends BukkitRunnable {
         else {
             ticksLagged = 0;
         }
-        logger.info("Batch took {}ms to process", processTimeNanos * 1.0E-6);
+//        logger.info("Batch took {}ms to process", processTimeNanos * 1.0E-6);
     }
 
     @Override
     public synchronized void cancel() throws IllegalStateException {
         filesStream.close();
+        HandlerList.unregisterAll(this);
         super.cancel();
     }
 }
