@@ -16,6 +16,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.datafix.fixes.References;
+import org.apache.commons.io.FileUtils;
 import org.bukkit.craftbukkit.CraftRegistry;
 import org.bukkit.craftbukkit.util.CraftMagicNumbers;
 import org.bukkit.event.EventHandler;
@@ -55,6 +56,7 @@ public class FileBatchingTask extends BukkitRunnable implements Listener {
     final IntFunction<String> itemUpdater, blockUpdater;
     final Logger logger;
 
+    final Path invalidFilesFolder;
     final DynamicOps<JsonElement> registryJsonOps = CraftRegistry.getMinecraftRegistry().createSerializationContext(JsonOps.INSTANCE);
     final int currentDataVersion = CraftMagicNumbers.INSTANCE.getDataVersion();
 
@@ -66,12 +68,27 @@ public class FileBatchingTask extends BukkitRunnable implements Listener {
         this.itemUpdater = itemUpdater;
         this.blockUpdater = blockUpdater;
         this.logger = plugin.getSLF4JLogger();
+        this.invalidFilesFolder = plugin.getDataFolder().toPath().resolve("invalid_stats");
+        Files.createDirectories(this.invalidFilesFolder);
+        FileUtils.cleanDirectory(this.invalidFilesFolder.toFile());
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void on(AsyncPlayerPreLoginEvent event) {
         event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, Component.text("Server is undergoing statistic files upgrade! DO NOT JOIN!", NamedTextColor.RED, TextDecoration.BOLD));
+    }
+
+    public void moveToInvalid(Path statsFile) {
+        try {
+            Files.move(statsFile, invalidFilesFolder.resolve(statsFile.getFileName()));
+        }
+        catch (IOException e) {
+            logger.error("IO error while moving stats file '{}' to invalids folder.", statsFile, e);
+        }
+        catch (Exception e) {
+            logger.error("Unknown exception while moving stats file '{}' to invalids folder.", statsFile, e);
+        }
     }
 
     @Override
@@ -83,10 +100,16 @@ public class FileBatchingTask extends BukkitRunnable implements Listener {
             JsonObject statsJson;
             try (JsonReader jsonReader = new JsonReader(new StringReader(Files.readString(statsFile)))) {
                 jsonReader.setLenient(false);
-                statsJson = Streams.parse(jsonReader).getAsJsonObject();
+                if (!(Streams.parse(jsonReader) instanceof JsonObject jsonObject)) {
+                    logger.error("Stats file '{}' loaded, but isn't a JSON object?", statsFile);
+                    moveToInvalid(statsFile);
+                    continue;
+                }
+                statsJson = jsonObject;
             }
             catch (JsonParseException e) {
                 logger.error("Stats file '{}' has invalid JSON, skipping.", statsFile, e);
+                moveToInvalid(statsFile);
                 continue;
             }
             catch (IOException e) {
@@ -95,6 +118,7 @@ public class FileBatchingTask extends BukkitRunnable implements Listener {
             }
             catch (Exception e) {
                 logger.error("Unknown exception while loading stats file '{}', skipping.", statsFile, e);
+                moveToInvalid(statsFile);
                 continue;
             }
             // If it has a data version or an updated "stats" block, it's new enough to hopefully not have number ids
@@ -106,6 +130,7 @@ public class FileBatchingTask extends BukkitRunnable implements Listener {
             JsonObject updatedStats = dataFixer.update(References.STATS, new Dynamic<>(registryJsonOps, statsJson), MCVersions.V15W32A, currentDataVersion).getValue().getAsJsonObject();
             if (!(updatedStats.get("stats") instanceof JsonObject statsObject)) {
                 logger.error("Stats file '{}' updated incorrectly? missing 'stats' object.", statsFile);
+                moveToInvalid(statsFile);
                 continue;
             }
 
@@ -147,6 +172,7 @@ public class FileBatchingTask extends BukkitRunnable implements Listener {
             }
             catch (Exception e) {
                 logger.error("Unknown exception while writing stats file '{}', skipping.", statsFile, e);
+                moveToInvalid(statsFile);
             }
         }
         if (!filesIter.hasNext()) {
