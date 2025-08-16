@@ -135,8 +135,15 @@ public class FileBatchingTask extends BukkitRunnable implements Listener {
             }
 
             // Pairs of statistic name -> values object
-            for (Map.Entry<String, JsonElement> entry : statsObject.entrySet()) {
+            Iterator<Map.Entry<String, JsonElement>> statisticsIterator = statsObject.entrySet().iterator();
+            while (statisticsIterator.hasNext()) {
+                Map.Entry<String, JsonElement> entry = statisticsIterator.next();
                 String statistic = entry.getKey();
+                if (!(entry.getValue() instanceof JsonObject statValues)) {
+                    logger.error("Stats file '{}' is valid, but has an invalid statistic value for '{}' (not a JSON object?):\n{}", statsFile, statistic, entry.getValue());
+                    statisticsIterator.remove();
+                    continue;
+                }
                 IntFunction<String> updater = switch (statistic) {
                     case "minecraft:crafted", "minecraft:used", "minecraft:broken", "minecraft:picked_up", "minecraft:dropped" -> itemUpdater;
                     case "minecraft:mined" -> blockUpdater;
@@ -145,7 +152,6 @@ public class FileBatchingTask extends BukkitRunnable implements Listener {
                 if (updater == null) {
                     continue;
                 }
-                JsonObject statValues = entry.getValue().getAsJsonObject();
                 JsonObject updatedStatValues = new JsonObject();
                 // Pairs of item/block types (or "minecraft:<legacy id>" in this case) to number values
                 for (Map.Entry<String, JsonElement> statEntry : statValues.entrySet()) {
